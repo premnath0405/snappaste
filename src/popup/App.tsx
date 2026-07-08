@@ -185,24 +185,24 @@ export function App() {
                 <div className="snippet-card-top">
                   <span className="snippet-drag-handle" title="Drag to reorder">⠿</span>
                   <span className="snippet-title">{snippet.title}</span>
+                  {/* Category badges — between title and copy hint */}
+                  {cats.length > 0 && (
+                    <div className="snippet-badges snippet-badges--inline">
+                      {cats.map((cat) => (
+                        <span
+                          key={cat.id}
+                          className="category-badge"
+                          style={{ background: cat.color }}
+                        >
+                          {cat.name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <span className="snippet-copy-hint">
                     {copiedId === snippet.id ? '✓ Copied!' : 'Click to copy'}
                   </span>
                 </div>
-                {/* Category badges — between title row and preview */}
-                {cats.length > 0 && (
-                  <div className="snippet-badges">
-                    {cats.map((cat) => (
-                      <span
-                        key={cat.id}
-                        className="category-badge"
-                        style={{ background: cat.color }}
-                      >
-                        {cat.name}
-                      </span>
-                    ))}
-                  </div>
-                )}
                 <p className="snippet-preview">{snippet.body.slice(0, 100)}{snippet.body.length > 100 ? '…' : ''}</p>
               </div>
             )

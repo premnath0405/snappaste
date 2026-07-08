@@ -259,6 +259,10 @@ export function App() {
     const updated = await saveSettings(patch)
     setSettings(updated)
     applyTheme(updated.theme)
+    // Tell the background worker to update the action popup binding immediately
+    if (patch.iconClick !== undefined) {
+      void browser.runtime.sendMessage({ type: 'SET_ICON_CLICK', value: updated.iconClick })
+    }
   }
 
   if (view === 'edit') {
@@ -388,6 +392,20 @@ export function App() {
                   >
                     {snippet.title}
                   </span>
+                  {/* Category badges — between title and Edit button */}
+                  {cats.length > 0 && (
+                    <div className="sp-card-badges sp-card-badges--inline">
+                      {cats.map((cat) => (
+                        <span
+                          key={cat.id}
+                          className="category-badge"
+                          style={{ background: cat.color }}
+                        >
+                          {cat.name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {copiedId === snippet.id && (
                     <span className="sp-card-copied-badge">✓ Copied!</span>
                   )}
@@ -406,20 +424,6 @@ export function App() {
                     </button>
                   </div>
                 </div>
-                {/* Category badges — between title row and preview */}
-                {cats.length > 0 && (
-                  <div className="sp-card-badges">
-                    {cats.map((cat) => (
-                      <span
-                        key={cat.id}
-                        className="category-badge"
-                        style={{ background: cat.color }}
-                      >
-                        {cat.name}
-                      </span>
-                    ))}
-                  </div>
-                )}
                 <p
                   className="sp-card-preview sp-card-preview--clickable"
                   onClick={() => initiateCopy(snippet)}
@@ -483,6 +487,18 @@ function SnippetEditor({ snippet, categories, onSave, onCancel }: EditorProps) {
     snippet?.categoryIds ?? []
   )
   const [saving, setSaving] = useState(false)
+  // Track desired caret position so we can restore it after React re-renders the textarea
+  const caretPosRef = useRef<number | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // After every body state update, restore caret if we have a pending position
+  useEffect(() => {
+    if (caretPosRef.current !== null && textareaRef.current) {
+      textareaRef.current.selectionStart = caretPosRef.current
+      textareaRef.current.selectionEnd = caretPosRef.current
+      caretPosRef.current = null
+    }
+  })
 
   function toggleCategory(id: string) {
     setSelectedCategoryIds((prev) =>
@@ -498,7 +514,7 @@ function SnippetEditor({ snippet, categories, onSave, onCancel }: EditorProps) {
     setSaving(false)
   }
 
-  /** Strip rich text on paste — keep plain text only */
+  /** Strip rich text on paste — insert plain text only at caret position */
   function handleBodyPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
     e.preventDefault()
     const plain = e.clipboardData.getData('text/plain')
@@ -506,11 +522,8 @@ function SnippetEditor({ snippet, categories, onSave, onCancel }: EditorProps) {
     const start = textarea.selectionStart
     const end = textarea.selectionEnd
     const newVal = body.slice(0, start) + plain + body.slice(end)
+    caretPosRef.current = start + plain.length
     setBody(newVal)
-    // Restore caret after state update
-    requestAnimationFrame(() => {
-      textarea.selectionStart = textarea.selectionEnd = start + plain.length
-    })
   }
 
   return (
@@ -569,6 +582,7 @@ function SnippetEditor({ snippet, categories, onSave, onCancel }: EditorProps) {
           </label>
           <textarea
             id="snippet-body"
+            ref={textareaRef}
             className="input sp-textarea"
             value={body}
             onChange={(e) => setBody(e.target.value)}
@@ -656,11 +670,6 @@ function SettingsPanel({ settings, lastSync, onClose, onChange }: SettingsPanelP
               Open side panel
             </label>
           </div>
-          {settings.iconClick === 'sidepanel' && (
-            <p className="settings-hint">
-              To fully enable side-panel-only mode, go to Chrome's extension settings and set the toolbar action to open the side panel.
-            </p>
-          )}
         </div>
 
         {/* Last sync */}

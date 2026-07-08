@@ -16,6 +16,10 @@
       "48": "icons/icon48.png"
     }
   },
+  "background": {
+    "service_worker": "src/background.ts",
+    "type": "module"
+  },
   "side_panel": {
     "default_path": "sidepanel/index.html"
   },

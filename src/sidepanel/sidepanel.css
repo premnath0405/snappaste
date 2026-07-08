@@ -161,6 +161,16 @@
   margin-bottom: var(--space-1);
 }
 
+/* Inline variant — sits inside the card-top row between title and Edit button */
+.sp-card-badges--inline {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--space-1);
+  margin-bottom: 0;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
 .sp-card-preview {
   margin: 0;
   font-size: var(--font-size-xs);
