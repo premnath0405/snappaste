@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import browser from 'webextension-polyfill'
 import type { AppSettings, Category, Snippet } from '../types'
 import {
@@ -20,6 +20,7 @@ import {
 import type { LastSyncInfo } from '../services/storageService'
 import { extractPlaceholders, fillPlaceholders } from '../utils/placeholder'
 import { copyText } from '../utils/clipboard'
+import { stripHtml } from '../utils/html'
 import { PlaceholderModal } from '../components/PlaceholderModal'
 import {
   exportWithPicker,
@@ -65,16 +66,12 @@ export function App() {
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const [showCategoryManager, setShowCategoryManager] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
-
-  // Settings
   const [settings, setSettings] = useState<AppSettings>({ theme: 'system', iconClick: 'popup' })
   const [lastSync, setLastSync] = useState<LastSyncInfo | null>(null)
-
-  // Placeholder modal state
-  const [pendingSnippet, setPendingSnippet] = useState<Snippet | null>(null)
-  const [pendingTokens, setPendingTokens] = useState<string[]>([])
-
-  // Sync file handle — kept in a ref so the storage listener always sees latest
+  // Consolidated: one state object instead of two separate snippet+tokens states
+  const [pending, setPending] = useState<{ snippet: Snippet; tokens: string[] } | null>(null)
+  const dragIdRef = useRef<string | null>(null)
+  // Sync file handle — in a ref so the storage listener always sees the latest value
   const syncHandleRef = useRef<FileSystemFileHandle | null>(null)
 
   const loadData = useCallback(async () => {
@@ -122,27 +119,39 @@ export function App() {
     return () => browser.storage.onChanged.removeListener(listener)
   }, [loadData])
 
-  const filteredSnippets = snippets.filter((s) => {
-    const matchesSearch =
-      search === '' ||
-      s.title.toLowerCase().includes(search.toLowerCase()) ||
-      s.body.toLowerCase().includes(search.toLowerCase())
-    const matchesCategory =
-      activeCategoryId === null || s.categoryIds.includes(activeCategoryId)
-    return matchesSearch && matchesCategory
-  })
+  // Memoised — only recomputes when snippets/search/activeCategoryId change
+  const searchLower = useMemo(() => search.toLowerCase(), [search])
+  const filteredSnippets = useMemo(() =>
+    snippets.filter((s) => {
+      if (activeCategoryId !== null && !s.categoryIds.includes(activeCategoryId)) return false
+      if (searchLower === '') return true
+      return (
+        s.title.toLowerCase().includes(searchLower) ||
+        stripHtml(s.body).toLowerCase().includes(searchLower)
+      )
+    }),
+    [snippets, searchLower, activeCategoryId]
+  )
 
-  function getCategoriesForSnippet(snippet: Snippet): Category[] {
-    return snippet.categoryIds
-      .map((id) => categories.find((c) => c.id === id))
-      .filter(Boolean) as Category[]
-  }
+  // O(1) category lookup map instead of repeated .find()
+  const categoryMap = useMemo(
+    () => new Map(categories.map((c) => [c.id, c])),
+    [categories]
+  )
+
+  const getCategoriesForSnippet = useCallback(
+    (snippet: Snippet): Category[] =>
+      snippet.categoryIds.map((id) => categoryMap.get(id)).filter(Boolean) as Category[],
+    [categoryMap]
+  )
 
   const [importExportMsg, setImportExportMsg] = useState<string | null>(null)
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   function showMsg(msg: string, duration = 3000) {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
     setImportExportMsg(msg)
-    setTimeout(() => setImportExportMsg(null), duration)
+    toastTimerRef.current = setTimeout(() => setImportExportMsg(null), duration)
   }
 
   // ⬆️ Export — pick save location, write file, register handle for auto-sync
@@ -201,12 +210,6 @@ export function App() {
     await loadData()
   }
 
-  const dragIdRef = useRef<string | null>(null)
-
-  function handleDragStart(id: string) {
-    dragIdRef.current = id
-  }
-
   async function handleDrop(targetId: string) {
     setDragOverId(null)
     const fromId = dragIdRef.current
@@ -223,56 +226,35 @@ export function App() {
   }
 
   function initiateCopy(snippet: Snippet) {
-    // Extract placeholders from plain text (strip HTML tags first)
-    const tmp = document.createElement('div')
-    tmp.innerHTML = snippet.body
-    const tokens = extractPlaceholders(tmp.innerText)
+    const tokens = extractPlaceholders(stripHtml(snippet.body))
     if (tokens.length > 0) {
-      setPendingSnippet(snippet)
-      setPendingTokens(tokens)
+      setPending({ snippet, tokens })
     } else {
       void performCopy(snippet.body, {}, snippet.id)
     }
   }
 
-  async function performCopy(
-    body: string,
-    values: Record<string, string>,
-    snippetId: string
-  ) {
+  async function performCopy(body: string, values: Record<string, string>, snippetId: string) {
     const filledHtml = fillPlaceholders(body, values)
-    // Strip HTML tags to get plain text
-    const tmp = document.createElement('div')
-    tmp.innerHTML = filledHtml
-    const plainText = tmp.innerText
-
+    const plainText = stripHtml(filledHtml)
     try {
-      // Write both HTML and plain text so rich-text apps get formatting,
-      // plain-text apps get clean text
-      const htmlBlob = new Blob([filledHtml], { type: 'text/html' })
-      const textBlob = new Blob([plainText], { type: 'text/plain' })
       await navigator.clipboard.write([
-        new ClipboardItem({ 'text/html': htmlBlob, 'text/plain': textBlob })
+        new ClipboardItem({
+          'text/html': new Blob([filledHtml], { type: 'text/html' }),
+          'text/plain': new Blob([plainText], { type: 'text/plain' }),
+        }),
       ])
     } catch {
-      // Fallback: copy plain text only
       await copyText(plainText)
     }
-
     setCopiedId(snippetId)
     setTimeout(() => setCopiedId((prev) => (prev === snippetId ? null : prev)), 1500)
   }
 
   function handleModalConfirm(values: Record<string, string>) {
-    if (!pendingSnippet) return
-    void performCopy(pendingSnippet.body, values, pendingSnippet.id)
-    setPendingSnippet(null)
-    setPendingTokens([])
-  }
-
-  function handleModalCancel() {
-    setPendingSnippet(null)
-    setPendingTokens([])
+    if (!pending) return
+    void performCopy(pending.snippet.body, values, pending.snippet.id)
+    setPending(null)
   }
 
   async function handleSettingsChange(patch: Partial<AppSettings>) {
@@ -395,9 +377,13 @@ export function App() {
             return (
               <div
                 key={snippet.id}
-                className={`sp-card ${copiedId === snippet.id ? 'sp-card--copied' : ''} ${dragOverId === snippet.id ? 'sp-card--drag-over' : ''}`}
+                className={[
+                  'sp-card',
+                  copiedId === snippet.id ? 'sp-card--copied' : '',
+                  dragOverId === snippet.id ? 'sp-card--drag-over' : '',
+                ].join(' ')}
                 draggable
-                onDragStart={() => handleDragStart(snippet.id)}
+                onDragStart={() => { dragIdRef.current = snippet.id }}
                 onDragOver={(e) => e.preventDefault()}
                 onDragEnter={() => setDragOverId(snippet.id)}
                 onDragLeave={() => setDragOverId(null)}
@@ -412,15 +398,10 @@ export function App() {
                   >
                     {snippet.title}
                   </span>
-                  {/* Category badges — between title and Edit button */}
                   {cats.length > 0 && (
                     <div className="sp-card-badges sp-card-badges--inline">
                       {cats.map((cat) => (
-                        <span
-                          key={cat.id}
-                          className="category-badge"
-                          style={{ background: cat.color }}
-                        >
+                        <span key={cat.id} className="category-badge" style={{ background: cat.color }}>
                           {cat.name}
                         </span>
                       ))}
@@ -449,12 +430,7 @@ export function App() {
                   onClick={() => initiateCopy(snippet)}
                   title="Click to copy"
                 >
-                  {(() => {
-                    const tmp = document.createElement('div')
-                    tmp.innerHTML = snippet.body
-                    const plain = tmp.innerText
-                    return plain.slice(0, 120) + (plain.length > 120 ? '…' : '')
-                  })()}
+                  {(() => { const p = stripHtml(snippet.body); return p.slice(0, 120) + (p.length > 120 ? '…' : '') })()}
                 </p>
               </div>
             )
@@ -484,11 +460,11 @@ export function App() {
       )}
 
       {/* Placeholder Modal */}
-      {pendingSnippet && (
+      {pending && (
         <PlaceholderModal
-          tokens={pendingTokens}
+          tokens={pending.tokens}
           onConfirm={handleModalConfirm}
-          onCancel={handleModalCancel}
+          onCancel={() => setPending(null)}
         />
       )}
 

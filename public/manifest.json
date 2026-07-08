@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SnapPaste",
-  "version": "1.0.0",
+  "version": "1.1",
   "description": "Snap your snippets, paste them instantly — with categories, placeholders, and file sync.",
   "icons": {
     "16": "icons/icon16.png",

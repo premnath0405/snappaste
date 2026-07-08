@@ -1,11 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import browser from 'webextension-polyfill'
 import type { Category, Snippet } from '../types'
 import { getCategories, getSnippets, saveSnippetOrder } from '../services/storageService'
 import { extractPlaceholders, fillPlaceholders } from '../utils/placeholder'
 import { copyText } from '../utils/clipboard'
+import { stripHtml } from '../utils/html'
 import { PlaceholderModal } from '../components/PlaceholderModal'
 import './popup.css'
+
+interface PendingCopy {
+  snippet: Snippet
+  tokens: string[]
+}
 
 export function App() {
   const [snippets, setSnippets] = useState<Snippet[]>([])
@@ -14,10 +20,8 @@ export function App() {
   const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
-
-  // Placeholder modal state
-  const [pendingSnippet, setPendingSnippet] = useState<Snippet | null>(null)
-  const [pendingTokens, setPendingTokens] = useState<string[]>([])
+  const [pending, setPending] = useState<PendingCopy | null>(null)
+  const dragIdRef = useRef<string | null>(null)
 
   const loadData = useCallback(async () => {
     const [cats, snips] = await Promise.all([getCategories(), getSnippets()])
@@ -32,59 +36,62 @@ export function App() {
     return () => browser.storage.onChanged.removeListener(listener)
   }, [loadData])
 
-  const filteredSnippets = snippets.filter((s) => {
-    const matchesSearch =
-      search === '' ||
-      s.title.toLowerCase().includes(search.toLowerCase()) ||
-      s.body.toLowerCase().includes(search.toLowerCase())
-    const matchesCategory =
-      activeCategoryId === null || s.categoryIds.includes(activeCategoryId)
-    return matchesSearch && matchesCategory
-  })
+  // Memoised — recomputes only when snippets, search or activeCategoryId change
+  const searchLower = useMemo(() => search.toLowerCase(), [search])
+  const filteredSnippets = useMemo(() =>
+    snippets.filter((s) => {
+      if (activeCategoryId !== null && !s.categoryIds.includes(activeCategoryId)) return false
+      if (searchLower === '') return true
+      return (
+        s.title.toLowerCase().includes(searchLower) ||
+        stripHtml(s.body).toLowerCase().includes(searchLower)
+      )
+    }),
+    [snippets, searchLower, activeCategoryId]
+  )
 
-  function getCategoriesForSnippet(snippet: Snippet): Category[] {
-    return snippet.categoryIds
-      .map((id) => categories.find((c) => c.id === id))
-      .filter(Boolean) as Category[]
-  }
+  // Stable map for O(1) category lookups instead of repeated .find()
+  const categoryMap = useMemo(
+    () => new Map(categories.map((c) => [c.id, c])),
+    [categories]
+  )
 
-  function inititateCopy(snippet: Snippet) {
-    const tokens = extractPlaceholders(snippet.body)
+  const getCategoriesForSnippet = useCallback(
+    (snippet: Snippet): Category[] =>
+      snippet.categoryIds.map((id) => categoryMap.get(id)).filter(Boolean) as Category[],
+    [categoryMap]
+  )
+
+  function initiateCopy(snippet: Snippet) {
+    const tokens = extractPlaceholders(stripHtml(snippet.body))
     if (tokens.length > 0) {
-      setPendingSnippet(snippet)
-      setPendingTokens(tokens)
+      setPending({ snippet, tokens })
     } else {
       void performCopy(snippet.body, {}, snippet.id)
     }
   }
 
-  async function performCopy(
-    body: string,
-    values: Record<string, string>,
-    snippetId: string
-  ) {
-    const filled = fillPlaceholders(body, values)
-    await copyText(filled)
+  async function performCopy(body: string, values: Record<string, string>, snippetId: string) {
+    const filledHtml = fillPlaceholders(body, values)
+    const plainText = stripHtml(filledHtml)
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/html': new Blob([filledHtml], { type: 'text/html' }),
+          'text/plain': new Blob([plainText], { type: 'text/plain' }),
+        }),
+      ])
+    } catch {
+      await copyText(plainText)
+    }
     setCopiedId(snippetId)
     setTimeout(() => setCopiedId((prev) => (prev === snippetId ? null : prev)), 1500)
   }
 
   function handleModalConfirm(values: Record<string, string>) {
-    if (!pendingSnippet) return
-    void performCopy(pendingSnippet.body, values, pendingSnippet.id)
-    setPendingSnippet(null)
-    setPendingTokens([])
-  }
-
-  function handleModalCancel() {
-    setPendingSnippet(null)
-    setPendingTokens([])
-  }
-
-  const dragIdRef = useRef<string | null>(null)
-
-  function handleDragStart(id: string) {
-    dragIdRef.current = id
+    if (!pending) return
+    void performCopy(pending.snippet.body, values, pending.snippet.id)
+    setPending(null)
   }
 
   async function handleDrop(targetId: string) {
@@ -102,10 +109,8 @@ export function App() {
   }
 
   function openSidePanel() {
-    // Open side panel — works in Chrome MV3
     void browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
       if (tab?.windowId != null) {
-        // chrome.sidePanel is not in the polyfill types; cast to any
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         void (browser as any).sidePanel?.open({ windowId: tab.windowId })
         window.close()
@@ -115,7 +120,6 @@ export function App() {
 
   return (
     <div className="popup-root">
-      {/* Header */}
       <header className="popup-header">
         <span className="popup-logo">⚡ SnapPaste</span>
         <button className="btn btn-ghost btn-sm" onClick={openSidePanel}>
@@ -123,7 +127,6 @@ export function App() {
         </button>
       </header>
 
-      {/* Search */}
       <div className="popup-search">
         <input
           className="input"
@@ -134,7 +137,6 @@ export function App() {
         />
       </div>
 
-      {/* Category Filter */}
       {categories.length > 0 && (
         <div className="popup-categories">
           <button
@@ -147,10 +149,12 @@ export function App() {
             <button
               key={cat.id}
               className={`cat-chip ${activeCategoryId === cat.id ? 'cat-chip--active' : ''}`}
-              style={activeCategoryId === cat.id ? { background: cat.color, color: '#fff', borderColor: cat.color } : { borderColor: cat.color, color: cat.color }}
-              onClick={() =>
-                setActiveCategoryId((prev) => (prev === cat.id ? null : cat.id))
+              style={
+                activeCategoryId === cat.id
+                  ? { background: cat.color, color: '#fff', borderColor: cat.color }
+                  : { borderColor: cat.color, color: cat.color }
               }
+              onClick={() => setActiveCategoryId((prev) => (prev === cat.id ? null : cat.id))}
             >
               {cat.name}
             </button>
@@ -158,7 +162,6 @@ export function App() {
         </div>
       )}
 
-      {/* Snippet List */}
       <div className="popup-list">
         {filteredSnippets.length === 0 ? (
           <div className="popup-empty">
@@ -169,31 +172,31 @@ export function App() {
         ) : (
           filteredSnippets.map((snippet) => {
             const cats = getCategoriesForSnippet(snippet)
+            const preview = stripHtml(snippet.body)
             return (
               <div
                 key={snippet.id}
-                className={`snippet-card snippet-card--clickable ${copiedId === snippet.id ? 'snippet-card--copied' : ''} ${dragOverId === snippet.id ? 'snippet-card--drag-over' : ''}`}
+                className={[
+                  'snippet-card snippet-card--clickable',
+                  copiedId === snippet.id ? 'snippet-card--copied' : '',
+                  dragOverId === snippet.id ? 'snippet-card--drag-over' : '',
+                ].join(' ')}
                 draggable
-                onDragStart={() => handleDragStart(snippet.id)}
+                onDragStart={() => { dragIdRef.current = snippet.id }}
                 onDragOver={(e) => e.preventDefault()}
                 onDragEnter={() => setDragOverId(snippet.id)}
                 onDragLeave={() => setDragOverId(null)}
                 onDrop={(e) => { e.stopPropagation(); void handleDrop(snippet.id) }}
-                onClick={() => inititateCopy(snippet)}
+                onClick={() => initiateCopy(snippet)}
                 title="Click to copy"
               >
                 <div className="snippet-card-top">
                   <span className="snippet-drag-handle" title="Drag to reorder">⠿</span>
                   <span className="snippet-title">{snippet.title}</span>
-                  {/* Category badges — between title and copy hint */}
                   {cats.length > 0 && (
                     <div className="snippet-badges snippet-badges--inline">
                       {cats.map((cat) => (
-                        <span
-                          key={cat.id}
-                          className="category-badge"
-                          style={{ background: cat.color }}
-                        >
+                        <span key={cat.id} className="category-badge" style={{ background: cat.color }}>
                           {cat.name}
                         </span>
                       ))}
@@ -203,19 +206,20 @@ export function App() {
                     {copiedId === snippet.id ? '✓ Copied!' : 'Click to copy'}
                   </span>
                 </div>
-                <p className="snippet-preview">{snippet.body.slice(0, 100)}{snippet.body.length > 100 ? '…' : ''}</p>
+                <p className="snippet-preview">
+                  {preview.slice(0, 100)}{preview.length > 100 ? '…' : ''}
+                </p>
               </div>
             )
           })
         )}
       </div>
 
-      {/* Placeholder Modal */}
-      {pendingSnippet && (
+      {pending && (
         <PlaceholderModal
-          tokens={pendingTokens}
+          tokens={pending.tokens}
           onConfirm={handleModalConfirm}
-          onCancel={handleModalCancel}
+          onCancel={() => setPending(null)}
         />
       )}
     </div>
