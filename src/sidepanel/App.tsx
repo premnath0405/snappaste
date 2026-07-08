@@ -487,6 +487,8 @@ function SnippetEditor({ snippet, categories, onSave, onCancel }: EditorProps) {
     snippet?.categoryIds ?? []
   )
   const [saving, setSaving] = useState(false)
+  const [editorTab, setEditorTab] = useState<'write' | 'preview'>('write')
+
   // Track desired caret position so we can restore it after React re-renders the textarea
   const caretPosRef = useRef<number | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -524,6 +526,53 @@ function SnippetEditor({ snippet, categories, onSave, onCancel }: EditorProps) {
     const newVal = body.slice(0, start) + plain + body.slice(end)
     caretPosRef.current = start + plain.length
     setBody(newVal)
+  }
+
+  /**
+   * Wrap the currently selected text with a marker (e.g. ** for bold).
+   * If the selection is already wrapped, remove the markers (toggle off).
+   */
+  function wrapSelection(marker: string) {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    const start = textarea.selectionStart
+    const end = textarea.selectionEnd
+    const selected = body.slice(start, end)
+    const before = body.slice(0, start)
+    const after = body.slice(end)
+    const mLen = marker.length
+
+    // Toggle off if already wrapped
+    if (
+      before.endsWith(marker) && after.startsWith(marker)
+    ) {
+      const newVal = before.slice(0, before.length - mLen) + selected + after.slice(mLen)
+      caretPosRef.current = start - mLen + selected.length
+      setBody(newVal)
+      return
+    }
+
+    // Wrap
+    const newVal = before + marker + selected + marker + after
+    // Place cursor after closing marker, or select the wrapped text
+    caretPosRef.current = end + mLen * 2
+    setBody(newVal)
+  }
+
+  /** Render markdown-like syntax to HTML for the preview pane */
+  function renderPreview(text: string): string {
+    return text
+      // Bold: **text** or __text__
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/__(.+?)__/g, '<strong>$1</strong>')
+      // Italic: *text* or _text_
+      .replace(/\*([^*\n]+?)\*/g, '<em>$1</em>')
+      .replace(/_([^_\n]+?)_/g, '<em>$1</em>')
+      // Underline: ~text~
+      .replace(/~(.+?)~/g, '<u>$1</u>')
+      // Escape HTML special chars first (do this before other replacements ideally — safe enough here)
+      // Line breaks
+      .replace(/\n/g, '<br/>')
   }
 
   return (
@@ -576,20 +625,89 @@ function SnippetEditor({ snippet, categories, onSave, onCancel }: EditorProps) {
         </div>
 
         <div className="sp-field sp-field--grow">
-          <label className="sp-label" htmlFor="snippet-body">
-            Body
-            <span className="sp-hint"> — use {'{{name}}'}, {'{{date}}'} for placeholders</span>
-          </label>
-          <textarea
-            id="snippet-body"
-            ref={textareaRef}
-            className="input sp-textarea"
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            onPaste={handleBodyPaste}
-            placeholder="Type your snippet here…"
-            rows={12}
-          />
+          {/* Label row */}
+          <div className="sp-body-header">
+            <label className="sp-label" htmlFor="snippet-body">
+              Body
+              <span className="sp-hint"> — use {'{{name}}'}, {'{{date}}'} for placeholders</span>
+            </label>
+            {/* Write / Preview tabs */}
+            <div className="sp-editor-tabs">
+              <button
+                type="button"
+                className={`sp-tab ${editorTab === 'write' ? 'sp-tab--active' : ''}`}
+                onClick={() => setEditorTab('write')}
+              >
+                Write
+              </button>
+              <button
+                type="button"
+                className={`sp-tab ${editorTab === 'preview' ? 'sp-tab--active' : ''}`}
+                onClick={() => setEditorTab('preview')}
+              >
+                Preview
+              </button>
+            </div>
+          </div>
+
+          {editorTab === 'write' && (
+            <>
+              {/* Formatting toolbar */}
+              <div className="sp-fmt-toolbar">
+                <button
+                  type="button"
+                  className="sp-fmt-btn"
+                  title="Bold (Ctrl+B) — wraps selection with **"
+                  onMouseDown={(e) => { e.preventDefault(); wrapSelection('**') }}
+                >
+                  <strong>B</strong>
+                </button>
+                <button
+                  type="button"
+                  className="sp-fmt-btn"
+                  title="Italic (Ctrl+I) — wraps selection with *"
+                  onMouseDown={(e) => { e.preventDefault(); wrapSelection('*') }}
+                >
+                  <em>I</em>
+                </button>
+                <button
+                  type="button"
+                  className="sp-fmt-btn"
+                  title="Underline — wraps selection with ~"
+                  onMouseDown={(e) => { e.preventDefault(); wrapSelection('~') }}
+                >
+                  <u>U</u>
+                </button>
+                <span className="sp-fmt-divider" />
+                <span className="sp-fmt-hint">Select text then click a style</span>
+              </div>
+
+              <textarea
+                id="snippet-body"
+                ref={textareaRef}
+                className="input sp-textarea"
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                onPaste={handleBodyPaste}
+                onKeyDown={(e) => {
+                  // Keyboard shortcuts: Ctrl/Cmd + B / I / U
+                  if ((e.ctrlKey || e.metaKey) && e.key === 'b') { e.preventDefault(); wrapSelection('**') }
+                  if ((e.ctrlKey || e.metaKey) && e.key === 'i') { e.preventDefault(); wrapSelection('*') }
+                  if ((e.ctrlKey || e.metaKey) && e.key === 'u') { e.preventDefault(); wrapSelection('~') }
+                }}
+                placeholder="Type your snippet here…"
+                rows={12}
+              />
+            </>
+          )}
+
+          {editorTab === 'preview' && (
+            <div
+              className="sp-preview-pane"
+              // eslint-disable-next-line react/no-danger
+              dangerouslySetInnerHTML={{ __html: renderPreview(body) || '<span class="sp-preview-empty">Nothing to preview yet…</span>' }}
+            />
+          )}
         </div>
 
         <div className="sp-editor-actions">
