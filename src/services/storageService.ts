@@ -1,8 +1,11 @@
 import browser from 'webextension-polyfill'
-import type { Category, Snippet } from '../types'
+import type { AppSettings, Category, Snippet } from '../types'
+import { DEFAULT_SETTINGS } from '../types'
 
 const CATEGORIES_KEY = 'categories'
 const SNIPPETS_KEY = 'snippets'
+const SETTINGS_KEY = 'settings'
+const LAST_SYNC_KEY = 'lastSync'
 
 // ─── Categories ──────────────────────────────────────────────────────────────
 
@@ -95,6 +98,36 @@ export async function deleteSnippet(id: string): Promise<void> {
 
 export async function saveSnippetOrder(ordered: Snippet[]): Promise<void> {
   await browser.storage.local.set({ [SNIPPETS_KEY]: ordered })
+}
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
+
+export async function getSettings(): Promise<AppSettings> {
+  const result = await browser.storage.local.get(SETTINGS_KEY)
+  return { ...DEFAULT_SETTINGS, ...(result[SETTINGS_KEY] as Partial<AppSettings> ?? {}) }
+}
+
+export async function saveSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
+  const current = await getSettings()
+  const updated = { ...current, ...patch }
+  await browser.storage.local.set({ [SETTINGS_KEY]: updated })
+  return updated
+}
+
+// ─── Last Sync ────────────────────────────────────────────────────────────────
+
+export interface LastSyncInfo {
+  timestamp: number
+  fileName: string
+}
+
+export async function getLastSync(): Promise<LastSyncInfo | null> {
+  const result = await browser.storage.local.get(LAST_SYNC_KEY)
+  return (result[LAST_SYNC_KEY] as LastSyncInfo) ?? null
+}
+
+export async function saveLastSync(info: LastSyncInfo): Promise<void> {
+  await browser.storage.local.set({ [LAST_SYNC_KEY]: info })
 }
 
 // ─── Bulk Import ──────────────────────────────────────────────────────────────

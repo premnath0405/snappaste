@@ -69,7 +69,7 @@ export async function exportWithPicker(
 ): Promise<FileSystemFileHandle> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handle = await (window as any).showSaveFilePicker({
-    suggestedName: `snippets-backup-${new Date().toISOString().slice(0, 10)}.json`,
+    suggestedName: `snappaste-backup-${new Date().toISOString().slice(0, 10)}.json`,
     types: [
       {
         description: 'JSON backup',

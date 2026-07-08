@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import browser from 'webextension-polyfill'
-import type { Category, Snippet } from '../types'
+import type { AppSettings, Category, Snippet } from '../types'
 import {
   getCategories,
   getSnippets,
@@ -12,7 +12,12 @@ import {
   updateCategory,
   deleteCategory,
   importData,
+  getSettings,
+  saveSettings,
+  getLastSync,
+  saveLastSync,
 } from '../services/storageService'
+import type { LastSyncInfo } from '../services/storageService'
 import { extractPlaceholders, fillPlaceholders } from '../utils/placeholder'
 import { copyText } from '../utils/clipboard'
 import { PlaceholderModal } from '../components/PlaceholderModal'
@@ -26,6 +31,29 @@ import './sidepanel.css'
 
 type View = 'list' | 'edit'
 
+// ─── Apply theme to <html> ─────────────────────────────────────────────────────
+
+function applyTheme(theme: AppSettings['theme']) {
+  const root = document.documentElement
+  if (theme === 'dark') {
+    root.setAttribute('data-theme', 'dark')
+  } else if (theme === 'light') {
+    root.setAttribute('data-theme', 'light')
+  } else {
+    root.removeAttribute('data-theme')
+  }
+}
+
+// ─── Format last sync timestamp ───────────────────────────────────────────────
+
+function formatSyncTime(ts: number): string {
+  const d = new Date(ts)
+  return d.toLocaleString(undefined, {
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  })
+}
+
 export function App() {
   const [snippets, setSnippets] = useState<Snippet[]>([])
   const [categories, setCategories] = useState<Category[]>([])
@@ -36,6 +64,11 @@ export function App() {
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const [showCategoryManager, setShowCategoryManager] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
+
+  // Settings
+  const [settings, setSettings] = useState<AppSettings>({ theme: 'system', iconClick: 'popup' })
+  const [lastSync, setLastSync] = useState<LastSyncInfo | null>(null)
 
   // Placeholder modal state
   const [pendingSnippet, setPendingSnippet] = useState<Snippet | null>(null)
@@ -51,11 +84,16 @@ export function App() {
     return { cats, snips }
   }, [])
 
-  // On mount: restore persisted file handle
+  // On mount: restore persisted file handle, load settings, load last sync
   useEffect(() => {
     getSyncFileHandle().then((h) => {
       syncHandleRef.current = h
     })
+    getSettings().then((s) => {
+      setSettings(s)
+      applyTheme(s.theme)
+    })
+    getLastSync().then(setLastSync)
   }, [])
 
   // On every storage change: reload data then auto-sync to file if handle exists
@@ -67,6 +105,12 @@ export function App() {
         if (syncHandleRef.current) {
           try {
             await autoSyncToFile(syncHandleRef.current, cats, snips)
+            const info: LastSyncInfo = {
+              timestamp: Date.now(),
+              fileName: syncHandleRef.current.name,
+            }
+            await saveLastSync(info)
+            setLastSync(info)
           } catch {
             // Permission revoked — clear the handle so we don't keep failing silently
             syncHandleRef.current = null
@@ -106,6 +150,12 @@ export function App() {
     try {
       const handle = await exportWithPicker(categories, snippets)
       syncHandleRef.current = handle
+      const info: LastSyncInfo = {
+        timestamp: Date.now(),
+        fileName: handle.name,
+      }
+      await saveLastSync(info)
+      setLastSync(info)
       showMsg(`Saved & syncing ${snippets.length} snippet${snippets.length !== 1 ? 's' : ''}`)
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return // user cancelled
@@ -205,6 +255,12 @@ export function App() {
     setPendingTokens([])
   }
 
+  async function handleSettingsChange(patch: Partial<AppSettings>) {
+    const updated = await saveSettings(patch)
+    setSettings(updated)
+    applyTheme(updated.theme)
+  }
+
   if (view === 'edit') {
     return (
       <SnippetEditor
@@ -243,6 +299,13 @@ export function App() {
             onClick={() => setShowCategoryManager(true)}
           >
             ⚙
+          </button>
+          <button
+            className="btn btn-icon btn-icon--lg"
+            title="Settings"
+            onClick={() => setShowSettings(true)}
+          >
+            ☰
           </button>
           <button className="btn btn-primary btn-sm" onClick={openNew}>
             + New
@@ -343,6 +406,7 @@ export function App() {
                     </button>
                   </div>
                 </div>
+                {/* Category badges — between title row and preview */}
                 {cats.length > 0 && (
                   <div className="sp-card-badges">
                     {cats.map((cat) => (
@@ -377,6 +441,16 @@ export function App() {
           onSave={saveCategory}
           onUpdate={updateCategory}
           onDelete={deleteCategory}
+        />
+      )}
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <SettingsPanel
+          settings={settings}
+          lastSync={lastSync}
+          onClose={() => setShowSettings(false)}
+          onChange={handleSettingsChange}
         />
       )}
 
@@ -422,6 +496,21 @@ function SnippetEditor({ snippet, categories, onSave, onCancel }: EditorProps) {
     setSaving(true)
     await onSave({ title: title.trim(), body, categoryIds: selectedCategoryIds })
     setSaving(false)
+  }
+
+  /** Strip rich text on paste — keep plain text only */
+  function handleBodyPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    e.preventDefault()
+    const plain = e.clipboardData.getData('text/plain')
+    const textarea = e.currentTarget
+    const start = textarea.selectionStart
+    const end = textarea.selectionEnd
+    const newVal = body.slice(0, start) + plain + body.slice(end)
+    setBody(newVal)
+    // Restore caret after state update
+    requestAnimationFrame(() => {
+      textarea.selectionStart = textarea.selectionEnd = start + plain.length
+    })
   }
 
   return (
@@ -483,6 +572,7 @@ function SnippetEditor({ snippet, categories, onSave, onCancel }: EditorProps) {
             className="input sp-textarea"
             value={body}
             onChange={(e) => setBody(e.target.value)}
+            onPaste={handleBodyPaste}
             placeholder="Type your snippet here…"
             rows={12}
           />
@@ -497,6 +587,107 @@ function SnippetEditor({ snippet, categories, onSave, onCancel }: EditorProps) {
           </button>
         </div>
       </form>
+    </div>
+  )
+}
+
+// ─── Settings Panel ────────────────────────────────────────────────────────────
+
+interface SettingsPanelProps {
+  settings: AppSettings
+  lastSync: LastSyncInfo | null
+  onClose: () => void
+  onChange: (patch: Partial<AppSettings>) => Promise<void>
+}
+
+function SettingsPanel({ settings, lastSync, onClose, onChange }: SettingsPanelProps) {
+  return (
+    <div className="ph-backdrop" onClick={onClose}>
+      <div
+        className="ph-modal settings-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="ph-title">Settings</h2>
+
+        {/* Theme */}
+        <div className="settings-section">
+          <label className="settings-label">Theme</label>
+          <div className="settings-radio-group">
+            {(['system', 'light', 'dark'] as const).map((t) => (
+              <label key={t} className="settings-radio">
+                <input
+                  type="radio"
+                  name="theme"
+                  value={t}
+                  checked={settings.theme === t}
+                  onChange={() => void onChange({ theme: t })}
+                />
+                {t === 'system' ? 'System default' : t.charAt(0).toUpperCase() + t.slice(1)}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {/* Icon click behaviour */}
+        <div className="settings-section">
+          <label className="settings-label">When clicking the extension icon</label>
+          <div className="settings-radio-group">
+            <label className="settings-radio">
+              <input
+                type="radio"
+                name="iconClick"
+                value="popup"
+                checked={settings.iconClick === 'popup'}
+                onChange={() => void onChange({ iconClick: 'popup' })}
+              />
+              Open popup
+            </label>
+            <label className="settings-radio">
+              <input
+                type="radio"
+                name="iconClick"
+                value="sidepanel"
+                checked={settings.iconClick === 'sidepanel'}
+                onChange={() => void onChange({ iconClick: 'sidepanel' })}
+              />
+              Open side panel
+            </label>
+          </div>
+          {settings.iconClick === 'sidepanel' && (
+            <p className="settings-hint">
+              To fully enable side-panel-only mode, go to Chrome's extension settings and set the toolbar action to open the side panel.
+            </p>
+          )}
+        </div>
+
+        {/* Last sync */}
+        <div className="settings-section">
+          <label className="settings-label">Backup sync</label>
+          {lastSync ? (
+            <div className="settings-sync-info">
+              <div className="settings-sync-row">
+                <span className="settings-sync-key">Last synced</span>
+                <span className="settings-sync-val">{formatSyncTime(lastSync.timestamp)}</span>
+              </div>
+              <div className="settings-sync-row">
+                <span className="settings-sync-key">File</span>
+                <span className="settings-sync-val settings-sync-file" title={lastSync.fileName}>
+                  {lastSync.fileName}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <p className="settings-hint">No backup file linked yet. Use ⬆️ Export to set one up.</p>
+          )}
+        </div>
+
+        <div className="ph-actions" style={{ marginTop: 'var(--space-3)' }}>
+          <button className="btn btn-ghost" onClick={onClose}>Close</button>
+        </div>
+      </div>
     </div>
   )
 }

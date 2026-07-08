@@ -189,6 +189,7 @@ export function App() {
                     {copiedId === snippet.id ? '✓ Copied!' : 'Click to copy'}
                   </span>
                 </div>
+                {/* Category badges — between title row and preview */}
                 {cats.length > 0 && (
                   <div className="snippet-badges">
                     {cats.map((cat) => (
